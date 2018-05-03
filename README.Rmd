@@ -216,7 +216,7 @@ tpaQuan <- prot %>%
 
 # Results 
 ## TPA Estimations
-```{r TPAridges}
+```{r TPAplots}
 boxPlot <- tpaQuan %>%
   mutate(bait = paste0("GST-", bait, "-ICD")) %>%
   ggplot(aes(x = as.factor(conc), y = logPreyConc)) +

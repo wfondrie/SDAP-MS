@@ -18,5 +18,5 @@ ggColors <- function(n) {
 # save function
 savePlot <- function(p, w, h) {
   ggsave(plot = p, filename = paste0("results/", substitute(p), ".pdf"), useDingbats = F,
-         width = w, height = h, unit = "in")
+         width = w, height = h, unit = "in", dpi = 300)
 }
