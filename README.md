@@ -20,6 +20,8 @@ library(knitr) # for the kable() function
 
 # load auxillary functions
 source("R/ggplotTheme.R") # Plot themes
+full <- 7
+half <- 3.33
 
 # Set ggplot2 theme
 theme_set(coolTheme)
@@ -273,20 +275,24 @@ TPA Estimations
 
 ``` r
 boxPlot <- tpaQuan %>%
-  filter(!is.na(logPreyConc), 
-         is.finite(logPreyConc)) %>%
   mutate(bait = paste0("GST-", bait, "-ICD")) %>%
   ggplot(aes(x = as.factor(conc), y = logPreyConc)) +
   geom_boxplot(fill = ggColors(3)[3]) +
   facet_wrap(~ bait, ncol = 1) +
   ylab(expression("[Protein] log"[10]~"(nM)")) +
   xlab("[Bait] (nM)")
-boxPlot
-```
 
-![](README_files/figure-markdown_github/TPAridges-1.png)
+savePlot(boxPlot, w = full/2, h = 4)
 
-``` r
+overallDist <- tpaQuan %>%
+  ggplot(aes(x = logPreyConc)) +
+  geom_density(fill = ggColors(3)[3]) +
+  xlab(expression("[Protein] log"[10]~"(nM)")) +
+  ylab("Density")
+
+savePlot(overallDist, w = full/2, h = 2)
+
+
 barPlot <- tpaQuan %>%
   group_by(samp) %>%
   filter(intensity > 0) %>%
@@ -305,7 +311,5 @@ barPlot <- tpaQuan %>%
   ylab("Number of Proteins (%)") +
   theme(legend.position = "none")
 
-barPlot
+savePlot(barPlot, w = full/2, h = 2)
 ```
-
-![](README_files/figure-markdown_github/TPAridges-2.png)

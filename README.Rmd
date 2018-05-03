@@ -254,7 +254,6 @@ barPlot <- tpaQuan %>%
   ylab("Number of Proteins (%)") +
   theme(legend.position = "none")
 
-barPlot
 savePlot(barPlot, w = full/2, h = 2)
 ```
 
