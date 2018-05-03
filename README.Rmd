@@ -1,0 +1,188 @@
+---
+title: "BTAP-MS"
+author: "William E Fondrie"
+date: "5/2/2018"
+output: 
+    github_document:
+        pandoc_args: --webtex
+---
+
+# Introduction  
+
+## Setup  
+```{r knitrSetup, echo=F, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+```  
+
+```{r loadPkgs, results='hide'}
+library(tidyverse)
+library(broom)
+library(ggridges)
+library(knitr) # for the kable() function
+
+# load auxillary functions
+source("R/ggplotTheme.R") # Plot themes
+
+# Set ggplot2 theme
+theme_set(coolTheme)
+```
+
+
+## Load MaxQuant Protein Results  
+
+Protein quantitation data was imported from the MaxQuant `proteinGroups.txt` files. Reverse and contaminant proteins were filtered out. Additionally, we required proteins to be quantified by a minimum of 2 peptides.  
+```{r loadData}
+prot <- read_tsv("data/combined/txt/proteinGroups.txt") %>%
+  filter(!str_detect(`Protein IDs`, "^(REV|CON)__"),
+         Peptides >= 2) 
+```
+
+The LFQ intensity columns for each protein were then extracted and reshaped from wide to long format for downstream modeling. The column names indicate the bait and concentration in the following form `[bait]_[3^x nM]`. Thus, `LFQ intensity LRP1B_1` indicates that the GST-LRP1B-ICD was used as bait at a concentration of 3 nM. Samples with the GST suffix indicate that only GST was used.  
+```{r extractLFQ}
+lfq <- prot %>%
+  select(`Protein IDs`, starts_with("LFQ ")) %>%
+  gather(samp, lfq, -`Protein IDs`) %>%
+  mutate(samp = str_match(samp, " (LRP1.*_.*)$")[ , 2],
+         bait = str_match(samp, "(LRP1.*)_")[ , 2], # extract bait used
+         conc = str_match(samp, "_(.*)$")[ , 2], # Create concentration column
+         conc = ifelse(conc == "GST", 0, 3^as.numeric(conc))) 
+
+# This results in "NAs introduced by coercion" warning, but the problem is
+# handled in the final `ifelse()` statement.
+```
+
+The number of proteins passing this stage of analysis is:  
+```{r numProt1}
+lfq %>% 
+  group_by(bait) %>%
+  summarize(proteins = length(unique(`Protein IDs`))) %>%
+  kable()
+```
+
+## Handling Missing Values
+
+Zeros, `0`, indicate missing values in the MaxQuant results. With the BTAP-MS experimental design, we expect a number of both values that are missing at random (MAR) and left censored (meaning below the limit of detection). In an effort to distinguish between these, missing values were left as `0` if all of the intensities at greater bait concentrations were also `0`. All other missing values were assumed to be MAR, and were not considered in modeling.
+
+```{r missingValues}
+lfqCensored <- lfq %>%
+  group_by(`Protein IDs`, bait) %>%
+  filter(sum(lfq) > 0) %>%
+  mutate(maxConc = max(conc[lfq > 0]),
+         lfq = ifelse(lfq == 0 & conc < maxConc, NA, lfq),
+         numNA = sum(is.na(lfq)),
+         numZero = sum(lfq == 0, na.rm = T))
+```
+
+In an effort to ensure robust modeling, only proteins with a minimum of 5 valid data points (out of the 9 total), were considered. Additionally, no more than 3 of the data points could be left censored, and in total 4 data points needed to be non-zero.
+```{r filtering}
+lfqFiltered <- lfqCensored %>%
+  group_by(`Protein IDs`, bait) %>%
+  filter(numNA <= 4,
+         numZero <= 3,
+         numNA + numZero <= 5)
+```
+
+The number of proteins passing this stage of analysis is:  
+```{r numProt2}
+lfqFiltered %>% 
+  group_by(bait) %>%
+  summarize(proteins = length(unique(`Protein IDs`))) %>%
+  kable()
+```
+
+## Transforming LFQ Intensities  
+
+The measured LFQ intensities indicate the amount of unbound protein in each sample. To convert this to be proportional to the amount of bound protein, which is needed obtain familiar binding curve shapes, the maximum LFQ intensity for each protein was subtracted and the signed was inversed.
+```{r lfqTransform}
+lfqModInput <- lfqFiltered %>%
+  group_by(`Protein IDs`, bait) %>%
+  mutate(response = -(lfq - max(lfq)))
+```
+
+## Nonlinear Modeling  
+
+Each protein was fit to the 1:1 equilibrium binding isotherm using nonlinear least-squares regression. The binding isotherm model takes the form of: 
+
+$$ R = \frac{ [B]_t * R_{max} }{ [B]_t + K_d } $$  
+
+Where given $R$ (the response) and $[B]_t$ (the total bait concentration), we fit the curves to estimate $R_{max}$ (the estimated maximal response) and $K_d$ (the equilibrium dissociation constant). 
+
+```{r modeling}
+mods <- lfqModInput %>%
+  rename(Protein = `Protein IDs`) %>% #glance() doesn't seem to like the long one
+  group_by(Protein, bait) %>%
+  filter(!is.na(response)) %>%
+  do(models = nls(response ~ (Rmax * conc) / (Kd + conc),
+                  data = .,
+                  start = list(Kd = 100, Rmax = 4e+07),
+                  control = list(maxiter = 200,
+                                 warnOnly = T)))
+
+# Retrieve information about model fits
+fitInfo <- mods %>% glance(models)
+
+kable(fitInfo[1:5, ])
+
+# Retrieve model parameter values
+fitVals <- mods %>% 
+  tidy(models) %>%
+  mutate(CV = std.error / estimate * 100)
+
+kable(fitVals[1:5, ])
+```
+
+Because many of the proteins we measured do not actually interact with the bait proteins, there are a large number of model fits that failed to converge. These were removed from consideration.
+
+```{r removeNotConverged}
+fits <- fitInfo %>%
+  filter(isConv) %>%
+  select(Protein, bait) %>%
+  left_join(fitVals)
+```
+
+And lastly, we reshape the parameter values to a wide format.  
+
+```{r paramTable}
+RmaxTbl <- fits %>%
+  filter(term == "Rmax") %>%
+  select(Protein, bait, estimate, CV) %>%
+  rename(Rmax = estimate, Rmax_CV = CV)
+
+fitTbl <- fits %>%
+  filter(term == "Kd") %>%
+  left_join(RmaxTbl)
+
+kable(fitTbl[1:5, ])
+```
+
+The number of proteins passing this stage of analysis is:  
+```{r numProt3}
+fitTbl %>% 
+  group_by(bait) %>%
+  summarize(proteins = length(unique(Protein))) %>%
+  kable()
+```
+
+## Filtering For Sufficient Model Fits
+
+While some estimated $K_d$ values are physically impossible, such as those below zero, others are outside of the range that this experiment was designed to measure. Because the bait concentrations used were between 1 and 2187 nM, we filtered for $K_d$ between 3 nM and 1000 nM. Additionally, higher coefficients of variation (CV) are indicative of poor model fits so we use it as an additional filter.  
+
+```{r filterFits}
+interactors <- fitTbl %>%
+  filter(estimate > 3, 
+         estimate < 1000,
+         CV < 100) %>%
+  arrange(CV)
+```
+
+The number of proteins passing this stage of analysis is:  
+```{r numProt4}
+interactors %>% 
+  group_by(bait) %>%
+  summarize(proteins = length(unique(Protein))) %>%
+  kable()
+```
+
+# Results  
+
+
