@@ -14,3 +14,9 @@ ggColors <- function(n) {
     hues = seq(15, 375, length = n + 1)
     hcl(h = hues, l = 65, c = 100)[1:n]
 }
+
+# save function
+savePlot <- function(p, w, h) {
+  ggsave(plot = p, filename = paste0("results/", substitute(p), ".pdf"), useDingbats = F,
+         width = w, height = h, unit = "in")
+}

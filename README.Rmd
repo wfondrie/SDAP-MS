@@ -9,6 +9,8 @@ output:
 
 # Introduction  
 
+# Methods  
+
 ## Setup  
 ```{r knitrSetup, echo=F, include=FALSE}
 knitr::opts_chunk$set(warning = F, message = F)
@@ -22,6 +24,8 @@ library(knitr) # for the kable() function
 
 # load auxillary functions
 source("R/ggplotTheme.R") # Plot themes
+full <- 7
+half <- 3.33
 
 # Set ggplot2 theme
 theme_set(coolTheme)
@@ -61,7 +65,7 @@ lfq %>%
 
 ## Handling Missing Values
 
-Zeros, `0`, indicate missing values in the MaxQuant results. With the BTAP-MS experimental design, we expect a number of both values that are missing at random (MAR) and left censored (meaning below the limit of detection). In an effort to distinguish between these, missing values were left as `0` if all of the intensities at greater bait concentrations were also `0`. All other missing values were assumed to be MAR, and were not considered in modeling.
+Zeros, `0`, indicate missing values in the MaxQuant results. With the BTAP-MS experimental design, we expect a number of both values that are missing at random (MAR) and left censored (meaning below the limit of detection). In an effort to distinguish between these, missing values were imputed as the minimum LFQ intensity of the run if all of the intensities at greater bait concentrations were also `0`. All other missing values were assumed to be MAR, and were not considered in modeling.
 
 ```{r missingValues}
 lfqCensored <- lfq %>%
@@ -70,7 +74,9 @@ lfqCensored <- lfq %>%
   mutate(maxConc = max(conc[lfq > 0]),
          lfq = ifelse(lfq == 0 & conc < maxConc, NA, lfq),
          numNA = sum(is.na(lfq)),
-         numZero = sum(lfq == 0, na.rm = T))
+         numZero = sum(lfq == 0, na.rm = T)) %>%
+  group_by(conc, bait) %>%
+  mutate(lfqImp = ifelse(lfq == 0, min(lfq[lfq > 0], na.rm = T), lfq))
 ```
 
 In an effort to ensure robust modeling, only proteins with a minimum of 5 valid data points (out of the 9 total), were considered. Additionally, no more than 3 of the data points could be left censored, and in total 4 data points needed to be non-zero.
@@ -96,12 +102,12 @@ The measured LFQ intensities indicate the amount of unbound protein in each samp
 ```{r lfqTransform}
 lfqModInput <- lfqFiltered %>%
   group_by(`Protein IDs`, bait) %>%
-  mutate(response = -(lfq - max(lfq)))
+  mutate(response = -(lfqImp - max(lfqImp)))
 ```
 
 ## Nonlinear Modeling  
 
-Each protein was fit to the 1:1 equilibrium binding isotherm using nonlinear least-squares regression. The binding isotherm model takes the form of: 
+Each protein was fit to the 1:1 equilibrium binding isotherm using nonlinear least-squares regression. The binding isotherm model takes the form of:  
 
 $$ R = \frac{ [B]_t * R_{max} }{ [B]_t + K_d } $$  
 
@@ -183,6 +189,74 @@ interactors %>%
   kable()
 ```
 
-# Results  
+## Protein Concentration Estimation  
+
+For the binding isotherm equation above to be valid, we must make the assumption that the conentration of prey protein, $[P]_t$ is much less than the $K_d$. In an effort to verify this assumption, the prey protein concentrations were crudely estimated using the "Total Protein Approach." This approach uses the following estimation to calculate the relative protein concentration in a shotgun proteomics study:    
+
+$$ \frac{Protein~Mass}{Total~Protein~Mass} \approx \frac{Protein~MS~Signal}{Total~MS~Signal}$$  
+
+Thus, given the mass spec signal (raw intensity) of a protein, the total mass spec signal (the sum of raw intensities for a run) we can estimate the relative contributation of a single protein to the total protein mass analyzed. Because the experiment was performed at a total protein conentration of 1 ug/uL, we can then calculate the individual protein concentrations using their molecular weights. 
+
+
+```{r TPAcalc}
+tpaQuan <- prot %>% 
+  select(`Protein IDs`, `Gene names`,`Mol. weight [kDa]`, starts_with("Intensity ")) %>%
+  gather(samp, intensity, starts_with("Intensity ")) %>%
+  rename(MW = `Mol. weight [kDa]`) %>%
+  mutate(samp = str_match(samp, " (LRP1.*_.*)$")[ , 2],
+         bait = str_match(samp, "(LRP1.*)_")[ , 2], # extract bait used
+         conc = str_match(samp, "_(.*)$")[ , 2], # Create concentration column
+         conc = ifelse(conc == "GST", 0, 3^as.numeric(conc))) %>%
+  group_by(samp) %>%
+  mutate(tpa = intensity / sum(intensity, na.rm = T) / (MW * 1000),
+         preyConc = tpa * 10^9,
+         logPreyConc = log10(preyConc)) 
+```
+
+
+# Results 
+## TPA Estimations
+```{r TPAridges}
+boxPlot <- tpaQuan %>%
+  mutate(bait = paste0("GST-", bait, "-ICD")) %>%
+  ggplot(aes(x = as.factor(conc), y = logPreyConc)) +
+  geom_boxplot(fill = ggColors(3)[3]) +
+  facet_wrap(~ bait, ncol = 1) +
+  ylab(expression("[Protein] log"[10]~"(nM)")) +
+  xlab("[Bait] (nM)")
+
+savePlot(boxPlot, w = full/2, h = 4)
+
+overallDist <- tpaQuan %>%
+  ggplot(aes(x = logPreyConc)) +
+  geom_density(fill = ggColors(3)[3]) +
+  xlab(expression("[Protein] log"[10]~"(nM)")) +
+  ylab("Density")
+
+savePlot(overallDist, w = full/2, h = 2)
+
+
+barPlot <- tpaQuan %>%
+  group_by(samp) %>%
+  filter(intensity > 0) %>%
+  summarize(total = length(preyConc),
+            `< 1` = sum(preyConc < 1) / total * 100,
+            `< 10` = sum(preyConc < 10) / total * 100,
+            `< 100` = sum(preyConc < 100)/ total * 100) %>%
+  gather(conc, percent, starts_with("<")) %>%
+  group_by(conc) %>%
+  summarize(avg = mean(percent),
+            ci = 1.96 * sd(percent) / sqrt(length(percent))) %>%
+  ggplot(aes(x = conc, y = avg, fill = conc)) +
+  geom_col(position = "dodge", color = "black") +
+  #geom_errorbar(aes(ymax = avg + ci, ymin = avg - ci), width = 0.25) +
+  xlab("[Protein] (nM)") +
+  ylab("Number of Proteins (%)") +
+  theme(legend.position = "none")
+
+barPlot
+savePlot(barPlot, w = full/2, h = 2)
+```
+
 
 

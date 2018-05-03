@@ -3,4 +3,5 @@
 .RData
 .Ruserdata
 data/*
+results/*
 !data/combined/txt/proteinGroups.txt
