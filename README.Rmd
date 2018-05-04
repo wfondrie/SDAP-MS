@@ -22,6 +22,8 @@ library(broom)
 library(ggridges)
 library(knitr) # for the kable() function
 
+set.seed(190875) # to ensure reproducibility
+
 # load auxillary functions
 source("R/ggplotTheme.R") # Plot themes
 full <- 7
@@ -224,6 +226,8 @@ highConf <- interactors %>%
   left_join(titer) %>%
   filter(CV <= 75) %>%
   arrange(CV) 
+
+write_delim(highConf, "protRes.txt")
 ```
 
 
@@ -299,6 +303,42 @@ cvDens <- interactors %>%
   xlab("Coefficient of Variation (%)")
   
 savePlot(cvDens, w = half, h = half)
+```
+
+## Plot some binding curves
+```{r plotExamples}
+curveFun <- function(df, conc) {
+    response <- (df$Rmax * conc) / (df$Kd + conc)
+    tibble(response = response,
+           conc = conc,
+           bait = bait,
+           Protein = Protein)
+}
+
+
+examples <- highConf %>%
+    group_by(bait) %>%
+    top_n(-3, CV) %>%
+    ungroup() 
+
+exampleCurves <- examples %>%
+    select(Protein, bait, estimate, Rmax) %>%
+    pmap(curveFun, conc = 1:2187)
+
+exDat <- examples %>%
+    select(Protein, bait, estimate, Rmax, CV) %>%
+    left_join(rename(lfqModInput, Protein = `Protein IDs`)) %>%
+    left_join(select(prot, `Protein IDs`, `Gene names`), by = c("Protein" = "Protein IDs")) %>%
+    ungroup() %>%
+    mutate(`Gene names` = fct_reorder(`Gene names`, CV))
+
+lrp1bPlots <- exDat %>%
+    filter(bait == "LRP1B") %>%
+    ggplot(aes(x = conc, y = response)) + 
+    geom_point() +
+    facet_wrap(~`Gene names`, ncol = 3, scales = "free_y")
+lrp1bPlots
+
 ```
 
 
