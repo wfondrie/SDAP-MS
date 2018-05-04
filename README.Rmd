@@ -169,26 +169,6 @@ fitTbl %>%
   kable()
 ```
 
-## Filtering For Sufficient Model Fits
-
-While some estimated $K_d$ values are physically impossible, such as those below zero, others are outside of the range that this experiment was designed to measure. Because the bait concentrations used were between 1 and 2187 nM, we filtered for $K_d$ between 3 nM and 1000 nM. Additionally, higher coefficients of variation (CV) are indicative of poor model fits so we use it as an additional filter.  
-
-```{r filterFits}
-interactors <- fitTbl %>%
-  filter(estimate > 3, 
-         estimate < 1000,
-         CV < 100) %>%
-  arrange(CV)
-```
-
-The number of proteins passing this stage of analysis is:  
-```{r numProt4}
-interactors %>% 
-  group_by(bait) %>%
-  summarize(proteins = length(unique(Protein))) %>%
-  kable()
-```
-
 ## Protein Concentration Estimation  
 
 For the binding isotherm equation above to be valid, we must make the assumption that the conentration of prey protein, $[P]_t$ is much less than the $K_d$. In an effort to verify this assumption, the prey protein concentrations were crudely estimated using the "Total Protein Approach." This approach uses the following estimation to calculate the relative protein concentration in a shotgun proteomics study:    
@@ -211,6 +191,39 @@ tpaQuan <- prot %>%
   mutate(tpa = intensity / sum(intensity, na.rm = T) / (MW * 1000),
          preyConc = tpa * 10^9,
          logPreyConc = log10(preyConc)) 
+
+titer <- tpaQuan %>%
+  rename(Protein = `Protein IDs`) %>%
+  group_by(Protein) %>%
+  summarize(maxConc = max(preyConc, na.rm = T))
+```
+
+## Filtering For Sufficient Model Fits
+
+While some estimated $K_d$ values are physically impossible, such as those below zero, others are outside of the range that this experiment was designed to measure. Because the bait concentrations used were between 1 and 2187 nM, we filtered for $K_d$ between 3 nM and 1000 nM. Additionally, higher coefficients of variation (CV) are indicative of poor model fits so we use it as an additional filter.  
+```{r filterFits}
+interactors <- fitTbl %>%
+  left_join(titer) %>%
+  filter(estimate > 1, 
+         estimate < 2187,
+         estimate > maxConc) %>%
+  arrange(CV) 
+```
+
+The number of proteins passing this stage of analysis is:  
+```{r numProt4}
+interactors %>% 
+  group_by(bait) %>%
+  summarize(proteins = length(unique(Protein))) %>%
+  kable()
+```
+
+## Final interactor list
+```{r final filter}
+highConf <- interactors %>%
+  left_join(titer) %>%
+  filter(CV <= 75) %>%
+  arrange(CV) 
 ```
 
 
@@ -222,15 +235,15 @@ boxPlot <- tpaQuan %>%
   ggplot(aes(x = as.factor(conc), y = logPreyConc)) +
   geom_boxplot(fill = ggColors(3)[3]) +
   facet_wrap(~ bait, ncol = 1) +
-  ylab(expression("[Protein] log"[10]~"(nM)")) +
-  xlab("[Bait] (nM)")
+  ylab(expression("log"[10]~"[Protein (nM)]")) +
+  xlab("Bait (nM)")
 
 savePlot(boxPlot, w = full/2, h = 4)
 
 overallDist <- tpaQuan %>%
   ggplot(aes(x = logPreyConc)) +
   geom_density(fill = ggColors(3)[3]) +
-  xlab(expression("[Protein] log"[10]~"(nM)")) +
+  xlab(expression("log"[10]~"[Protein (nM)]")) +
   ylab("Density")
 
 savePlot(overallDist, w = full/2, h = 2)
@@ -250,12 +263,44 @@ barPlot <- tpaQuan %>%
   ggplot(aes(x = conc, y = avg, fill = conc)) +
   geom_col(position = "dodge", color = "black") +
   #geom_errorbar(aes(ymax = avg + ci, ymin = avg - ci), width = 0.25) +
-  xlab("[Protein] (nM)") +
+  xlab("Protein (nM)") +
   ylab("Number of Proteins (%)") +
   theme(legend.position = "none")
 
 savePlot(barPlot, w = full/2, h = 2)
 ```
+
+## Evaluating Model Fits
+```{r fitEval}
+fitScatter <- interactors %>% 
+  #filter(CV <= 100) %>%
+  mutate(Bait = paste0("GST-", bait, "-ICD")) %>%
+  ggplot(aes(x = log10(estimate), y = CV, color = Bait)) +
+  geom_point() +
+  geom_hline(yintercept = 75, linetype = "dashed") + 
+  theme(legend.position = c(0, 1),
+        legend.justification = c(0, 1),
+        legend.background = element_rect(color = "black"),
+        legend.title.align = 0.5,
+        legend.key.height = unit(0.5, "lines")) +
+  xlab(expression("Log"[10]~"[K"[d]~" (nM)]")) +
+  ylab("Coefficient of Variation (%)")
+
+savePlot(fitScatter, w = half, h = half)
+
+cvDens <- interactors %>%
+  mutate(Bait = paste0("GST-", bait, "-ICD")) %>%
+  ggplot(aes(x = CV, fill = bait)) +
+  geom_histogram() +
+  geom_vline(xintercept = 75, linetype = "dashed") +
+  facet_wrap(~Bait, ncol = 1) +
+  theme(legend.position = "none") +
+  ylab("Number of Proteins") +
+  xlab("Coefficient of Variation (%)")
+  
+savePlot(cvDens, w = half, h = half)
+```
+
 
 
 
