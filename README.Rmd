@@ -227,17 +227,17 @@ highConf <- interactors %>%
   filter(CV <= 75) %>%
   arrange(CV) 
 
-write_delim(highConf, "protRes.txt")
 ```
 
 
 # Results 
-## TPA Estimations
+## TPA Estimation Plots
 ```{r TPAplots}
 boxPlot <- tpaQuan %>%
   mutate(bait = paste0("GST-", bait, "-ICD")) %>%
   ggplot(aes(x = as.factor(conc), y = logPreyConc)) +
-  geom_boxplot(fill = ggColors(3)[3]) +
+  geom_violin(fill = ggColors(3)[3]) +
+  geom_boxplot(fill = "grey", width = 0.2, outlier.shape = NA) +
   facet_wrap(~ bait, ncol = 1) +
   ylab(expression("log"[10]~"[Protein (nM)]")) +
   xlab("Bait (nM)")
@@ -274,7 +274,7 @@ barPlot <- tpaQuan %>%
 savePlot(barPlot, w = full/2, h = 2)
 ```
 
-## Evaluating Model Fits
+## Evaluating Model Fit Plots
 ```{r fitEval}
 fitScatter <- interactors %>% 
   #filter(CV <= 100) %>%
@@ -305,40 +305,88 @@ cvDens <- interactors %>%
 savePlot(cvDens, w = half, h = half)
 ```
 
-## Plot some binding curves
+## Binding Curve Plots
 ```{r plotExamples}
-curveFun <- function(df, conc) {
-    response <- (df$Rmax * conc) / (df$Kd + conc)
-    tibble(response = response,
-           conc = conc,
-           bait = bait,
-           Protein = Protein)
+plotIsotherm <- function(dat, responseDat = lfqModInput, logScale = F, ncol = 3) {
+  
+    # Function to create binding curves
+    curveFun <- function(Protein, Rmax, estimate, CV, `Gene names`, ..., conc) {
+        response <- (Rmax * conc) / (estimate + conc)
+        tibble(response = response,
+               conc = conc,
+               Protein = Protein,
+               CV = CV,
+               `Gene names` = `Gene names`)
+    }
+    
+    
+    if(logScale) {
+      x <- 10^(seq(0,log10(2187), length.out = 100))
+    } else {
+      x <- seq(0, 2187, length.out = 100)
+    }
+    
+    # create curve data
+    curveDat <- dat %>%
+        select(Protein, estimate, Rmax, CV, `Gene names`)%>%
+        pmap_df(curveFun, conc = x) %>%
+        ungroup() %>%
+        mutate(`Gene names` = fct_reorder(`Gene names`, CV))
+    
+    # Add response data
+    dat <- dat %>% 
+        select(Protein, bait, estimate, Rmax, CV, `Gene names`) %>%
+        left_join(rename(responseDat, Protein = `Protein IDs`)) %>%
+        ungroup() %>%
+        mutate(`Gene names` = fct_reorder(`Gene names`, CV))
+
+    # make plot
+    p <- dat %>%
+        ggplot(aes(x = conc, y = response * 10e-8)) +
+        geom_line(data = curveDat, color = "blue") +
+        geom_point() +
+        facet_wrap(~`Gene names`, ncol = ncol, scales = "free_y") +
+        ylab(expression("Response (10"^8~")"))
+      
+    
+    if(logScale){ p <- p + scale_x_log10() } 
+    
+    if(length(unique(dat$bait)) == 2) {
+        p <- p + xlab("Bait (nM)") 
+    } else {
+        p <- p + xlab(paste0("GST-", dat$bait[1], "-ICD (nM)"))
+    }
+    
+    p
 }
+
+plotIsotherm(examples[2, ], lfqModInput, logScale = T)
 
 
 examples <- highConf %>%
     group_by(bait) %>%
     top_n(-3, CV) %>%
-    ungroup() 
+    left_join(select(prot, `Protein IDs`, `Gene names`), by = c("Protein" = "Protein IDs"))  
 
-exampleCurves <- examples %>%
-    select(Protein, bait, estimate, Rmax) %>%
-    pmap(curveFun, conc = 1:2187)
-
-exDat <- examples %>%
-    select(Protein, bait, estimate, Rmax, CV) %>%
-    left_join(rename(lfqModInput, Protein = `Protein IDs`)) %>%
-    left_join(select(prot, `Protein IDs`, `Gene names`), by = c("Protein" = "Protein IDs")) %>%
-    ungroup() %>%
-    mutate(`Gene names` = fct_reorder(`Gene names`, CV))
-
-lrp1bPlots <- exDat %>%
+exLrp1b <- examples %>%
     filter(bait == "LRP1B") %>%
-    ggplot(aes(x = conc, y = response)) + 
-    geom_point() +
-    facet_wrap(~`Gene names`, ncol = 3, scales = "free_y")
-lrp1bPlots
+    plotIsotherm()
+exLrp1b
 
+exLogLrp1b <- examples %>%
+    filter(bait == "LRP1B") %>%
+    plotIsotherm(logScale = T)
+exLogLrp1b
+
+exLrp1 <- examples %>%
+    filter(bait == "LRP1") %>%
+    plotIsotherm()
+exLrp1
+
+exLogLrp1 <- examples %>%
+    filter(bait == "LRP1") %>%
+    plotIsotherm(logScale = T)
+exLogLrp1
 ```
 
 
