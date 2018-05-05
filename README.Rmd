@@ -334,22 +334,26 @@ plotIsotherm <- function(dat, responseDat = lfqModInput, logScale = F, ncol = 3)
         mutate(`Gene names` = fct_reorder(`Gene names`, CV))
     
     # Add response data
-    dat <- dat %>% 
+    datR <- dat %>% 
         select(Protein, bait, estimate, Rmax, CV, `Gene names`) %>%
         left_join(rename(responseDat, Protein = `Protein IDs`)) %>%
         ungroup() %>%
         mutate(`Gene names` = fct_reorder(`Gene names`, CV))
 
     # make plot
-    p <- dat %>%
-        ggplot(aes(x = conc, y = response * 10e-8)) +
-        geom_line(data = curveDat, color = "blue") +
-        geom_point() +
+    p <- datR %>%
+        ggplot(aes(x = conc, y = response * 1e-8)) +
+        geom_line(data = curveDat, color = ggColors(3)[3]) +
+        geom_point(size = 0.5) +
         facet_wrap(~`Gene names`, ncol = ncol, scales = "free_y") +
         ylab(expression("Response (10"^8~")"))
       
     
-    if(logScale){ p <- p + scale_x_log10() } 
+    if(logScale){ 
+        p <- p + scale_x_log10(breaks = c(1, 10, 100, 1000)) 
+    } else {
+        p <- p + scale_x_continuous(breaks = c(0, 1000, 2000))
+    } 
     
     if(length(unique(dat$bait)) == 2) {
         p <- p + xlab("Bait (nM)") 
@@ -360,9 +364,6 @@ plotIsotherm <- function(dat, responseDat = lfqModInput, logScale = F, ncol = 3)
     p
 }
 
-plotIsotherm(examples[2, ], lfqModInput, logScale = T)
-
-
 examples <- highConf %>%
     group_by(bait) %>%
     top_n(-3, CV) %>%
@@ -371,23 +372,41 @@ examples <- highConf %>%
 exLrp1b <- examples %>%
     filter(bait == "LRP1B") %>%
     plotIsotherm()
-exLrp1b
+savePlot(exLrp1b, w = half, h = 1.5)
 
 exLogLrp1b <- examples %>%
     filter(bait == "LRP1B") %>%
     plotIsotherm(logScale = T)
-exLogLrp1b
+savePlot(exLogLrp1b, w = half, h = 1.5)
 
 exLrp1 <- examples %>%
     filter(bait == "LRP1") %>%
     plotIsotherm()
-exLrp1
+savePlot(exLrp1, w = half, h = 1.5)
 
 exLogLrp1 <- examples %>%
     filter(bait == "LRP1") %>%
     plotIsotherm(logScale = T)
-exLogLrp1
+savePlot(exLogLrp1, w = half, h = 1.5)
 ```
+
+## Plot with error of these?
+```{r morePlots}
+exBar <- examples %>%
+    ungroup() %>%
+    mutate(`Gene names` = fct_reorder2(`Gene names`, 
+                                       fct_rev(as.factor(bait)), 
+                                       CV, 
+                                       .desc = F),
+           Bait = paste0("GST-", bait, "-ICD")) %>% 
+    ggplot(aes(x = `Gene names`, y = estimate, fill = Bait)) +
+    geom_col() +
+    theme(legend.position = "none",
+          axis.title.x = element_blank()) +
+    facet_wrap(~Bait, ncol = 2, scales = "free_x")
+savePlot(exBar, w = half, h = 1.5)
+```
+
 
 
 
