@@ -326,11 +326,23 @@ interactors %>%
 ## Final interactor list
 
 ``` r
+highConfCut <- quantile(interactors$CV, 0.05)
+
 highConf <- interactors %>%
-  left_join(titer) %>%
-  filter(CV <= 75) %>%
-  arrange(CV) 
+    ungroup() %>%
+    filter(CV <= highConfCut) %>%
+    arrange(CV) 
+
+highConf %>% 
+  group_by(bait) %>%
+  summarize(proteins = length(unique(Protein))) %>%
+  kable()
 ```
+
+| bait  | proteins |
+| :---- | -------: |
+| LRP1  |        7 |
+| LRP1B |       10 |
 
 # Results
 
@@ -343,7 +355,7 @@ boxPlot <- tpaQuan %>%
   geom_violin(fill = ggColors(3)[3]) +
   geom_boxplot(fill = "grey", width = 0.2, outlier.shape = NA) +
   facet_wrap(~ bait, ncol = 1) +
-  ylab(expression("log"[10]~"[Protein (nM)]")) +
+  ylab(expression("log"[10]*"[Protein (nM)]")) +
   xlab("Bait (nM)")
 
 savePlot(boxPlot, w = full/2, h = 4)
@@ -351,7 +363,7 @@ savePlot(boxPlot, w = full/2, h = 4)
 overallDist <- tpaQuan %>%
   ggplot(aes(x = logPreyConc)) +
   geom_density(fill = ggColors(3)[3]) +
-  xlab(expression("log"[10]~"[Protein (nM)]")) +
+  xlab(expression("log"[10]*"[Protein (nM)]")) +
   ylab("Density")
 
 savePlot(overallDist, w = full/2, h = 2)
@@ -382,17 +394,16 @@ savePlot(barPlot, w = full/2, h = 2)
 
 ``` r
 fitScatter <- interactors %>% 
-  #filter(CV <= 100) %>%
   mutate(Bait = paste0("GST-", bait, "-ICD")) %>%
   ggplot(aes(x = log10(estimate), y = CV, color = Bait)) +
   geom_point() +
-  geom_hline(yintercept = 75, linetype = "dashed") + 
+  geom_hline(yintercept = highConfCut, linetype = "dashed") + 
   theme(legend.position = c(0, 1),
         legend.justification = c(0, 1),
         legend.background = element_rect(color = "black"),
         legend.title.align = 0.5,
         legend.key.height = unit(0.5, "lines")) +
-  xlab(expression("Log"[10]~"[K"[d]~" (nM)]")) +
+  xlab(expression("Log"[10]*"[K"[d]~" (nM)]")) +
   ylab("Coefficient of Variation (%)")
 
 savePlot(fitScatter, w = half, h = half)
@@ -401,7 +412,7 @@ cvDens <- interactors %>%
   mutate(Bait = paste0("GST-", bait, "-ICD")) %>%
   ggplot(aes(x = CV, fill = bait)) +
   geom_histogram() +
-  geom_vline(xintercept = 75, linetype = "dashed") +
+  geom_vline(xintercept = highConfCut, linetype = "dashed") +
   facet_wrap(~Bait, ncol = 1) +
   theme(legend.position = "none") +
   ylab("Number of Proteins") +
@@ -452,7 +463,7 @@ plotIsotherm <- function(dat, responseDat = lfqModInput, logScale = F, ncol = 3)
         geom_line(data = curveDat, color = ggColors(3)[3]) +
         geom_point(size = 0.5) +
         facet_wrap(~`Gene names`, ncol = ncol, scales = "free_y") +
-        ylab(expression("Response (10"^6~")"))
+        ylab(expression("Response (10"^6*")"))
       
     
     if(logScale){ 
@@ -516,5 +527,3 @@ exBar <- examples %>%
     ylab(expression("K"[d]~"(nM)"))
 savePlot(exBar, w = half, h = 1.5)
 ```
-
-## Compare to Bioplex 2.0 Results
