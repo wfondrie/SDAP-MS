@@ -29,6 +29,6 @@ sslOut <- percDat %>%
     select(file, scan, charge, sequence,`score-type`, `percolator q-value`) %>%
     rename(score = `percolator q-value`) %>%
     mutate(sequence = str_replace(sequence, "15.99", "+15.99")) %>%
-    filter(score >= 0.01)
+    filter(score <= 0.01)
 
 write_tsv(sslOut, "data/percolator_results.ssl")
