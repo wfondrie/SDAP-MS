@@ -40,8 +40,8 @@ Protein quantitation data was imported from the MaxQuant `proteinGroups.txt` fil
 ```{r loadData}
 prot <- read_tsv("data/combined/txt/proteinGroups.txt") %>%
   filter(!str_detect(`Protein IDs`, "^(REV|CON)__"),
-         Peptides >= 2) %>%
-    select(-ends_with("LRP1_6"))
+         Peptides >= 2) #%>%
+    #select(-ends_with("LRP1_6"))
 ```
 
 The LFQ intensity columns for each protein were then extracted and reshaped from wide to long format for downstream modeling. The column names indicate the bait and concentration in the following form `[bait]_[3^x nM]`. Thus, `LFQ intensity LRP1B_1` indicates that the GST-LRP1B-ICD was used as bait at a concentration of 3 nM. Samples with the GST suffix indicate that only GST was used.  
@@ -79,13 +79,14 @@ lfqCensored <- lfq %>%
          numNA = sum(is.na(lfq)),
          numZero = sum(lfq == 0, na.rm = T),
          numTotal = length(lfq)) %>%
-  #group_by(conc, bait) %>%
-  group_by(bait) %>%
+  group_by(conc, bait) %>%
+  #group_by(bait) %>%
   mutate(lfqImp = ifelse(lfq == 0, min(lfq[lfq > 0], na.rm = T), lfq))
 
 lfqCensored %>%
     group_by(bait, conc) %>%
-    summarize(min(lfqImp, na.rm = T))
+    summarize(minLFQ = min(lfqImp, na.rm = T),
+              numMissing = sum(lfq == 0, na.rm = T))
 ```
 
 In an effort to ensure robust modeling, only proteins with a minimum of 5 valid data points (out of the 9 total), were considered. Additionally, no more than 3 of the data points could be left censored, and in total 4 data points needed to be non-zero.
@@ -93,7 +94,7 @@ In an effort to ensure robust modeling, only proteins with a minimum of 5 valid 
 lfqFiltered <- lfqCensored %>%
   group_by(`Protein IDs`, bait) %>%
   filter(numNA <= 4,
-         numZero <= 6,
+         numZero <= 0,
          numTotal - (numNA + numZero) >= 4)
 ```
 
@@ -213,8 +214,8 @@ While some estimated $K_d$ values are physically impossible, such as those below
 ```{r filterFits}
 interactors <- fitTbl %>%
   left_join(titer) %>%
-  filter(estimate > 3, 
-         estimate < 729,
+  filter(estimate > 1, 
+         estimate < 1000,
          estimate > maxConc * 10) %>%
   arrange(CV) 
 ```
@@ -436,7 +437,8 @@ savePlot(exBar, w = 2*half, h = 4)
 
 
 ```{r}
-a <- highConf%>%
+a <- highConf %>%
+    filter(bait == "LRP1") %>%
     left_join(select(prot, `Protein IDs`, `Gene names`), by = c("Protein" = "Protein IDs")) %>%
     arrange(`Gene names`)
 ```
