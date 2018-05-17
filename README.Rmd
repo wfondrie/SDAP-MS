@@ -21,6 +21,7 @@ library(tidyverse)
 library(broom)
 library(ggridges)
 library(knitr) # for the kable() function
+library(seqinr) # calculate molecular weights
 
 set.seed(190875) # to ensure reproducibility
 
@@ -34,85 +35,60 @@ theme_set(coolTheme)
 ```
 
 
-## Load MaxQuant Protein Results  
+## Load Skyline Results  
 
-Protein quantitation data was imported from the MaxQuant `proteinGroups.txt` files. Reverse and contaminant proteins were filtered out. Additionally, we required proteins to be quantified by a minimum of 2 peptides.  
+Precursor quantitation data was imported from the Skyline (exported "Transition Results" report) `skyline_results.csv`. Proteins were summarized as the sum of all precursor intensities for the protein. The `Replicate` column indicates the bait and concentration in the following form `...[bait]-Rep1-[3^x nM]`. Thus, `...LRP1B-Rep1-1` indicates that the GST-LRP1B-ICD was used as bait at a concentration of 3 nM. Samples with the GST suffix indicate that only GST was used.
 ```{r loadData}
-prot <- read_tsv("data/combined/txt/proteinGroups.txt") %>%
-  filter(!str_detect(`Protein IDs`, "^(REV|CON)__"),
-         Peptides >= 2) #%>%
-    #select(-ends_with("LRP1_6"))
-```
+prot <- read_csv("data/skyline_results.csv") %>%
+    group_by(Protein, Replicate) %>%
+    summarize(intensity = sum(Area, na.rm = T)) %>%
+    ungroup() %>%
+    mutate(bait = paste0("GST", str_match(Replicate, "BTAP(-.+-)Rep")[ , 2], "ICD"),
+           bait = str_replace(bait, "LRP-", "LRP1-"),
+           conc = str_match(Replicate, "Rep1-(.*?)(-|_|$)")[ , 2],
+           conc = ifelse(conc == "GST", 0, 3^as.numeric(conc)))
 
-The LFQ intensity columns for each protein were then extracted and reshaped from wide to long format for downstream modeling. The column names indicate the bait and concentration in the following form `[bait]_[3^x nM]`. Thus, `LFQ intensity LRP1B_1` indicates that the GST-LRP1B-ICD was used as bait at a concentration of 3 nM. Samples with the GST suffix indicate that only GST was used.  
-```{r extractLFQ}
-lfq <- prot %>%
-  select(`Protein IDs`, starts_with("LFQ ")) %>%
-  gather(samp, lfq, -`Protein IDs`) %>%
-  mutate(samp = str_match(samp, " (LRP1.*_.*)$")[ , 2],
-         bait = str_match(samp, "(LRP1.*)_")[ , 2], # extract bait used
-         conc = str_match(samp, "_(.*)$")[ , 2], # Create concentration column
-         conc = ifelse(conc == "GST", 0, 3^as.numeric(conc))) 
+# Retrieve protein info
+fasta <- read.fasta("data/SwissProt-Human_v2018-02_GST.fasta", seqtype = "AA", 
+                    as.string =T, set.attributes = T)
 
-# This results in "NAs introduced by coercion" warning, but the problem is
-# handled in the final `ifelse()` statement.
+fastaKey <- tibble(Protein = names(fasta), sequence = unlist(fasta), 
+                   annotation = map_chr(fasta, ~ attributes(.)$Annot))
+
+protInfo <- prot %>%
+    group_by(Protein) %>%
+    summarize(accession = str_match(Protein, "\\|(.*)\\|") [1 , 2]) %>%
+    left_join(fastaKey) %>%
+    group_by(Protein) %>%
+    mutate(MW = pmw(unlist(str_split(sequence, ""))) / 1000, #kDa
+           gn = str_match(annotation, "GN=(.*?) ")[ , 2]) %>%
+    select(Protein, accession, gn, MW) # only the cols we'll use
+
+# Median normalization
+globalMedian <- log2(median(prot$intensity))
+
+lfq <- prot %>% 
+    group_by(Replicate) %>% 
+    mutate(medianIntensity = log2(median(intensity)),
+           lfq = 2^(log2(intensity) - medianIntensity + globalMedian))
+
 ```
 
 The number of proteins passing this stage of analysis is:  
 ```{r numProt1}
-lfq %>% 
+prot %>% 
   group_by(bait) %>%
-  summarize(proteins = length(unique(`Protein IDs`))) %>%
+  summarize(proteins = length(unique(Protein))) %>%
   kable()
 ```
 
-## Handling Missing Values
+## Transforming Intensities  
 
-Zeros, `0`, indicate missing values in the MaxQuant results. With the BTAP-MS experimental design, we expect a number of both values that are missing at random (MAR) and left censored (meaning below the limit of detection). In an effort to distinguish between these, missing values were imputed as the minimum LFQ intensity of the run if all of the intensities at greater bait concentrations were also `0`. All other missing values were assumed to be MAR, and were not considered in modeling.
-
-```{r missingValues}
-lfqCensored <- lfq %>%
-  group_by(`Protein IDs`, bait) %>%
-  filter(sum(lfq) > 0) %>%
-  mutate(maxConc = max(conc[lfq > 0]),
-         lfq = ifelse(lfq == 0 & conc < maxConc, NA, lfq),
-         numNA = sum(is.na(lfq)),
-         numZero = sum(lfq == 0, na.rm = T),
-         numTotal = length(lfq)) %>%
-  group_by(conc, bait) %>%
-  #group_by(bait) %>%
-  mutate(lfqImp = ifelse(lfq == 0, min(lfq[lfq > 0], na.rm = T), lfq))
-
-lfqCensored %>%
-    group_by(bait, conc) %>%
-    summarize(minLFQ = min(lfqImp, na.rm = T),
-              numMissing = sum(lfq == 0, na.rm = T))
-```
-
-In an effort to ensure robust modeling, only proteins with a minimum of 5 valid data points (out of the 9 total), were considered. Additionally, no more than 3 of the data points could be left censored, and in total 4 data points needed to be non-zero.
-```{r filtering}
-lfqFiltered <- lfqCensored %>%
-  group_by(`Protein IDs`, bait) %>%
-  filter(numNA <= 4,
-         numZero <= 0,
-         numTotal - (numNA + numZero) >= 4)
-```
-
-The number of proteins passing this stage of analysis is:  
-```{r numProt2}
-lfqFiltered %>% 
-  group_by(bait) %>%
-  summarize(proteins = length(unique(`Protein IDs`))) %>%
-  kable()
-```
-
-## Transforming LFQ Intensities  
-
-The measured LFQ intensities indicate the amount of unbound protein in each sample. To convert this to be proportional to the amount of bound protein, which is needed obtain familiar binding curve shapes, the maximum LFQ intensity for each protein was subtracted and the signed was inversed.
+The measured intensities indicate the amount of unbound protein in each sample. To convert this to be proportional to the amount of bound protein, which is needed obtain familiar binding curve shapes, the maximum LFQ intensity for each protein was subtracted and the signed was inversed.
 ```{r lfqTransform}
-lfqModInput <- lfqFiltered %>%
-  group_by(`Protein IDs`, bait) %>%
-  mutate(response = -(lfqImp - max(lfqImp)))
+lfqModInput <- lfq %>%
+  group_by(Protein, bait) %>%
+  mutate(response =  max(lfq) - lfq)
 ```
 
 ## Nonlinear Modeling  
@@ -125,7 +101,6 @@ Where given $R$ (the response) and $[B]_t$ (the total bait concentration), we fi
 
 ```{r modeling}
 mods <- lfqModInput %>%
-  rename(Protein = `Protein IDs`) %>% #glance() doesn't seem to like the long one
   group_by(Protein, bait) %>%
   filter(!is.na(response)) %>%
   do(models = nls(response ~ (Rmax * conc) / (Kd + conc),
@@ -185,32 +160,25 @@ For the binding isotherm equation above to be valid, we must make the assumption
 
 $$ \frac{Protein~Mass}{Total~Protein~Mass} \approx \frac{Protein~MS~Signal}{Total~MS~Signal}$$  
 
-Thus, given the mass spec signal (raw intensity) of a protein, the total mass spec signal (the sum of raw intensities for a run) we can estimate the relative contributation of a single protein to the total protein mass analyzed. Because the experiment was performed at a total protein conentration of 1 ug/uL, we can then calculate the individual protein concentrations using their molecular weights. 
+Thus, given the mass spec signal of a protein, the total mass spec signal (the sum of intensities for a run) we can estimate the relative contributation of a single protein to the total protein mass analyzed. Because the experiment was performed at a total protein conentration of 1 ug/uL, we can then calculate the individual protein concentrations using their molecular weights. 
 
 
 ```{r TPAcalc}
-tpaQuan <- prot %>% 
-  select(`Protein IDs`, `Gene names`,`Mol. weight [kDa]`, starts_with("Intensity ")) %>%
-  gather(samp, intensity, starts_with("Intensity ")) %>%
-  rename(MW = `Mol. weight [kDa]`) %>%
-  mutate(samp = str_match(samp, " (LRP1.*_.*)$")[ , 2],
-         bait = str_match(samp, "(LRP1.*)_")[ , 2], # extract bait used
-         conc = str_match(samp, "_(.*)$")[ , 2], # Create concentration column
-         conc = ifelse(conc == "GST", 0, 3^as.numeric(conc))) %>%
-  group_by(samp) %>%
-  mutate(tpa = intensity / sum(intensity, na.rm = T) / (MW * 1000),
+tpaQuan <- lfqModInput %>%
+  group_by(bait, conc) %>%
+  left_join(protInfo) %>%
+  mutate(tpa = lfq / sum(lfq, na.rm = T) / (MW * 1000),
          preyConc = tpa * 10^9,
-         logPreyConc = log10(preyConc)) 
+         logPreyConc = log10(preyConc))
 
 titer <- tpaQuan %>%
-  rename(Protein = `Protein IDs`) %>%
   group_by(Protein) %>%
   summarize(maxConc = max(preyConc, na.rm = T))
 ```
 
 ## Filtering For Sufficient Model Fits
 
-While some estimated $K_d$ values are physically impossible, such as those below zero, others are outside of the range that this experiment was designed to measure. Because the bait concentrations used were between 1 and 2187 nM, we filtered for $K_d$ between 3 nM and 1000 nM. Additionally, higher coefficients of variation (CV) are indicative of poor model fits so we use it as an additional filter.  
+While some estimated $K_d$ values are physically impossible, such as those below zero, others are outside of the range that this experiment was designed to measure. Because the bait concentrations used were between 1 and 2187 nM, we filtered for $K_d$ between 1 nM and 1000 nM. Additionally, higher coefficients of variation (CV) are indicative of poor model fits so we use it as an additional filter.  
 ```{r filterFits}
 interactors <- fitTbl %>%
   left_join(titer) %>%
@@ -230,7 +198,7 @@ interactors %>%
 
 ## Final interactor list
 ```{r final filter}
-highConfCut <- quantile(interactors$CV, 0.1)
+highConfCut <- quantile(interactors$CV, 0.05)
 
 highConf <- interactors %>%
     ungroup() %>%
@@ -241,6 +209,9 @@ highConf %>%
   group_by(bait) %>%
   summarize(proteins = length(unique(Protein))) %>%
   kable()
+
+a <- filter(highConf, bait == "GST-LRP-ICD") %>%
+    mutate(gn = str_match(Protein, "\\|.*\\|(.*)?_")[ , 2])
 ```
 
 
@@ -248,7 +219,6 @@ highConf %>%
 ## TPA Estimation Plots
 ```{r TPAplots}
 boxPlot <- tpaQuan %>%
-  mutate(bait = paste0("GST-", bait, "-ICD")) %>%
   ggplot(aes(x = as.factor(conc), y = logPreyConc)) +
   geom_violin(fill = ggColors(3)[3]) +
   geom_boxplot(fill = "grey", width = 0.2, outlier.shape = NA) +
@@ -258,27 +228,42 @@ boxPlot <- tpaQuan %>%
 
 savePlot(boxPlot, w = full/2, h = 4)
 
-overallDist <- tpaQuan %>%
-  ggplot(aes(x = logPreyConc)) +
+overallDist <- titer %>%
+  ggplot(aes(x = log10(maxConc))) +
   geom_density(fill = ggColors(3)[3]) +
   xlab(expression("log"[10]*"[Protein (nM)]")) +
   ylab("Density")
-
 savePlot(overallDist, w = full/2, h = 2)
 
 
-barPlot <- tpaQuan %>%
-  group_by(samp) %>%
-  filter(intensity > 0) %>%
-  summarize(total = length(preyConc),
-            `< 1` = sum(preyConc < 1) / total * 100,
-            `< 10` = sum(preyConc < 10) / total * 100,
-            `< 100` = sum(preyConc < 100)/ total * 100) %>%
+# some concentration stats
+titer %>% 
+    summarize(Mean = mean(log10(maxConc)),
+              `Mean (nM)` = 10^Mean,
+              `Std Dev` = sd(log10(maxConc)),
+              total = length(Protein),
+              `< 1` = sum(maxConc < 1) / total * 100,
+              `< 10` = sum(maxConc < 10) / total * 100,
+              `< 100` = sum(maxConc < 100)/ total * 100) %>%
+    kable
+
+# park stats
+tpaQuan %>%
+    left_join(protInfo) %>%
+    filter(gn == "PARK7") %>%
+    ungroup() %>%
+    summarize(`mean (nM)` = mean(preyConc),
+              `se` = sd(preyConc) / sqrt(length(preyConc))) %>%
+    kable
+
+
+barPlot <- titer %>%
+  summarize(total = length(Protein),
+            `< 1` = sum(maxConc < 1) / total * 100,
+            `< 10` = sum(maxConc < 10) / total * 100,
+            `< 100` = sum(maxConc < 100)/ total * 100) %>%
   gather(conc, percent, starts_with("<")) %>%
-  group_by(conc) %>%
-  summarize(avg = mean(percent),
-            ci = 1.96 * sd(percent) / sqrt(length(percent))) %>%
-  ggplot(aes(x = conc, y = avg, fill = conc)) +
+  ggplot(aes(x = conc, y = percent, fill = conc)) +
   geom_col(position = "dodge", color = "black") +
   #geom_errorbar(aes(ymax = avg + ci, ymin = avg - ci), width = 0.25) +
   xlab("Protein (nM)") +
@@ -291,10 +276,10 @@ savePlot(barPlot, w = full/2, h = 2)
 ## Evaluating Model Fit Plots
 ```{r fitEval}
 fitScatter <- interactors %>% 
-  mutate(Bait = paste0("GST-", bait, "-ICD")) %>%
-  ggplot(aes(x = log10(estimate), y = CV, color = Bait)) +
+  ggplot(aes(x = log10(estimate), y = CV, color = bait)) +
   geom_point() +
   geom_hline(yintercept = highConfCut, linetype = "dashed") + 
+  scale_color_discrete(name = "Bait") +
   theme(legend.position = c(0, 1),
         legend.justification = c(0, 1),
         legend.background = element_rect(color = "black"),
@@ -306,11 +291,10 @@ fitScatter <- interactors %>%
 savePlot(fitScatter, w = half, h = half)
 
 cvDens <- interactors %>%
-  mutate(Bait = paste0("GST-", bait, "-ICD")) %>%
   ggplot(aes(x = CV, fill = bait)) +
   geom_histogram() +
   geom_vline(xintercept = highConfCut, linetype = "dashed") +
-  facet_wrap(~Bait, ncol = 1) +
+  facet_wrap(~bait, ncol = 1) +
   theme(legend.position = "none") +
   ylab("Number of Proteins") +
   xlab("Coefficient of Variation (%)")
@@ -323,13 +307,15 @@ savePlot(cvDens, w = half, h = half)
 plotIsotherm <- function(dat, responseDat = lfqModInput, logScale = F, ncol = 3) {
   
     # Function to create binding curves
-    curveFun <- function(Protein, Rmax, estimate, CV, `Gene names`, ..., conc) {
+    curveFun <- function(Protein, Rmax, estimate, CV, gn, bait,..., conc) {
         response <- (Rmax * conc) / (estimate + conc)
         tibble(response = response,
                conc = conc,
                Protein = Protein,
                CV = CV,
-               `Gene names` = `Gene names`)
+               gn = gn,
+               estimate = estimate,
+               bait = bait)
     }
     
     
@@ -341,25 +327,26 @@ plotIsotherm <- function(dat, responseDat = lfqModInput, logScale = F, ncol = 3)
     
     # create curve data
     curveDat <- dat %>%
-        select(Protein, estimate, Rmax, CV, `Gene names`)%>%
+        select(Protein, estimate, Rmax, CV, gn, bait)%>%
         pmap_df(curveFun, conc = x) %>%
         ungroup() %>%
-        mutate(`Gene names` = fct_reorder(`Gene names`, CV))
+        mutate(gn = fct_reorder2(gn, as.numeric(bait), estimate))
     
     # Add response data
     datR <- dat %>% 
-        select(Protein, bait, estimate, Rmax, CV, `Gene names`) %>%
-        left_join(rename(responseDat, Protein = `Protein IDs`)) %>%
+        select(Protein, bait, estimate, Rmax, CV, gn) %>%
+        left_join(responseDat) %>%
         ungroup() %>%
-        mutate(`Gene names` = fct_reorder(`Gene names`, CV))
+        mutate(gn = fct_reorder2(gn, as.numeric(bait), estimate))
 
     # make plot
     p <- datR %>%
-        ggplot(aes(x = conc, y = response * 1e-6)) +
-        geom_line(data = curveDat, color = ggColors(3)[3]) +
+        ggplot(aes(x = conc, y = response * 1e-7)) +
+        geom_line(aes(color = bait), data = curveDat) +#, color = ggColors(3)[3]) +
         geom_point(size = 0.5) +
-        facet_wrap(~`Gene names`, ncol = ncol, scales = "free_y") +
-        ylab(expression("Response (10"^6*")"))
+        facet_wrap(~gn, ncol = ncol, scales = "free_y") +
+        ylab(expression("Response (10"^7*")")) +
+        scale_color_discrete(name = "Bait")
       
     
     if(logScale){ 
@@ -370,77 +357,88 @@ plotIsotherm <- function(dat, responseDat = lfqModInput, logScale = F, ncol = 3)
     
     if(length(unique(dat$bait)) == 2) {
         p <- p + xlab("Bait (nM)") 
+        
     } else {
-        p <- p + xlab(paste0("GST-", dat$bait[1], "-ICD (nM)"))
+        p <- p + xlab(paste0(dat$bait[1], " (nM)"))
     }
     
     p
 }
 
-examples <- highConf %>%
-    group_by(bait) %>%
-    top_n(-3, CV) %>%
-    left_join(select(prot, `Protein IDs`, `Gene names`), by = c("Protein" = "Protein IDs"))  
 
-exLrp1b <- examples %>%
-    filter(bait == "LRP1B") %>%
-    plotIsotherm()
-savePlot(exLrp1b, w = half, h = 1.5)
+allCurves <- highConf %>%
+    left_join(protInfo) %>%
+    plotIsotherm(logScale = T, ncol = 3) +
+    theme(legend.position = c(0.75, 0),
+          legend.justification = c(0, 0),
+          legend.key.size = unit(0.5, "lines"),
+          legend.background = element_rect(color = "black")) 
+savePlot(allCurves, w = 2 * full / 3, h = 5)
 
-exLogLrp1b <- examples %>%
-    filter(bait == "LRP1B") %>%
-    plotIsotherm(logScale = T)
-savePlot(exLogLrp1b, w = half, h = 1.5)
-
-exLrp1 <- examples %>%
-    filter(bait == "LRP1") %>%
-    plotIsotherm()
-savePlot(exLrp1, w = half, h = 1.5)
-
-exLogLrp1 <- examples %>%
-    filter(bait == "LRP1") %>%
-    plotIsotherm(logScale = T)
-savePlot(exLogLrp1, w = half, h = 1.5)
-
-allLrp1b <- highConf %>%
-    filter(bait == "LRP1B") %>%
-    left_join(select(prot, `Protein IDs`, `Gene names`), by = c("Protein" = "Protein IDs"))  %>%
-    plotIsotherm(logScale = T, ncol = 6) 
-
-allLrp <- highConf %>%
-    filter(bait == "LRP1") %>%
-    left_join(select(prot, `Protein IDs`, `Gene names`), by = c("Protein" = "Protein IDs"))  %>%
-    plotIsotherm(logScale = T, ncol = 6) 
 ```
 
 ## Plot Calculated Affinities and Error Bars
 ```{r morePlots}
 exBar <- highConf %>%
-    left_join(select(prot, `Protein IDs`, `Gene names`), by = c("Protein" = "Protein IDs")) %>%
+    left_join(protInfo) %>%
     ungroup() %>%
-    mutate(`Gene names` = fct_reorder2(`Gene names`, 
-                                       fct_rev(as.factor(bait)), 
-                                       estimate, 
-                                       .desc = F),
-           Bait = paste0("GST-", bait, "-ICD"),
+    mutate(gn = fct_reorder2(gn, 
+                             fct_rev(as.factor(bait)), 
+                             estimate, 
+                             .desc = F),
            affinity = ifelse(estimate >= 50, "low", "high")) %>% 
-    ggplot(aes(x = `Gene names`, y = estimate, fill = Bait)) +
-    geom_col() +
-    geom_errorbar(aes(ymin = estimate - std.error, ymax = estimate + std.error),
-                  width = 0.5) +
+    ggplot(aes(x = gn, y = estimate, color = bait)) +
+    geom_pointrange(aes(ymin = estimate - std.error, ymax = estimate + std.error),
+                  width = 1, fatten = 2) +
     theme(legend.position = "none",
-          axis.title.x = element_blank()) +
-    facet_grid(.~bait, scales = "free", space = "free") +
-    ylab(expression("K"[d]~"(nM)"))
-savePlot(exBar, w = 2*half, h = 4)
+          axis.title.y = element_blank()) +
+    facet_wrap(~bait, scales = "free_y", drop = T, ncol = 1) +
+    ylab(expression("K"[d]~"(nM)")) +
+    coord_flip()
+savePlot(exBar, w = full / 3, h = 5)
+```
+
+## Info on specific proteins
+```{r}
+# lrp1 biogrid
+bioGridLrp1 <- read_tsv("data/bioGrid_lrp1.txt")
+lrp1Genes <- unique(c(bioGridLrp1$`Official Symbol Interactor A`, 
+                      bioGridLrp1$`Official Symbol Interactor B`))
+
+interactors %>%
+    left_join(protInfo) %>%
+    filter(gn %in% lrp1Genes,
+           bait == "GST-LRP1-ICD") %>%
+    kable
+
+# lrp1b biogrid
+bioGridLrp1b <- read_tsv("data/bioGrid_lrp1b.txt")
+lrp1bGenes <- unique(c(bioGridLrp1b$`Official Symbol Interactor A`, 
+                      bioGridLrp1b$`Official Symbol Interactor B`))
+
+interactors %>%
+    left_join(protInfo) %>%
+    filter(gn %in% lrp1bGenes,
+           bait == "GST-LRP1B-ICD") %>%
+    kable
+
+
+# all high conf
+highConf %>%
+    left_join(protInfo) %>%
+    kable
+```
+
+## Write tables
+```{r}
+# to be added
 ```
 
 
-```{r}
-a <- highConf %>%
-    filter(bait == "LRP1") %>%
-    left_join(select(prot, `Protein IDs`, `Gene names`), by = c("Protein" = "Protein IDs")) %>%
-    arrange(`Gene names`)
+
+# Session Info
+```{r, results = "as-is"}
+devtools::session_info()
 ```
 
 
