@@ -3,8 +3,6 @@ BTAP-MS
 William E Fondrie
 5/2/2018
 
-# Introduction
-
 # Methods
 
 ## Setup

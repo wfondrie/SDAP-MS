@@ -6,9 +6,6 @@ output:
     github_document:
         pandoc_args: --webtex
 ---
-
-# Introduction  
-
 # Methods  
 
 ## Setup  
