@@ -1,7 +1,6 @@
-BTAP-MS
+SDAP-MS
 ================
 William E Fondrie
-5/2/2018
 
 # Methods
 

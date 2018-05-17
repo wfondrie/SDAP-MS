@@ -1,7 +1,6 @@
 ---
 title: "SDAP-MS"
 author: "William E Fondrie"
-date: "5/2/2018"
 output: 
     github_document:
         pandoc_args: --webtex
